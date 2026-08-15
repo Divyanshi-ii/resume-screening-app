@@ -1,0 +1,10 @@
+{
+  "description": "Analyze resumes against job descriptions to provide match scores, keyword insights, and improvement tips, helping users optimize applications across various fields.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Analysis Result</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>Analysis Result</h1>
+
+        <p><strong>Match Score:</strong> {{ score }}%</p>
+
+        <h3>Matched Keywords</h3>
+        <p>{{ matched }}</p>
+
+        <h3>Missing Keywords</h3>
+        <p>{{ missing }}</p>
+
+        <a href="/">Go Back</a>
+    </div>
+</body>
+</html>
