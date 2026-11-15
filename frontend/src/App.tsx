@@ -245,7 +245,7 @@ function Tag({ label, type }: { label: string; type: 'matched' | 'missing' }) {
 }
 
 // ─── Upload Zone ──────────────────────────────────────────────────────────────
-function UploadZone({ onFile }: { onFile: (name: string, text: string) => void }) {
+function UploadZone({ onFile }: { onFile: (name: string, text: string, file: File) => void }) {
   const [dragging, setDragging] = useState(false)
   const [fileName, setFileName] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -253,12 +253,14 @@ function UploadZone({ onFile }: { onFile: (name: string, text: string) => void }
   const handleFile = useCallback((file: File) => {
   setFileName(file.name)
 
-  const reader = new FileReader()
-  reader.onload = () => {
-    const text = String(reader.result || "")
-    onFile(file.name, text)
+  // PDFs are sent to the Flask backend as-is; only plain .txt is read in the browser
+  if (file.name.toLowerCase().endsWith('.txt')) {
+    const reader = new FileReader()
+    reader.onload = () => onFile(file.name, String(reader.result || ''), file)
+    reader.readAsText(file)
+  } else {
+    onFile(file.name, '', file)
   }
-  reader.readAsText(file)
 }, [onFile])
 
   const onDrop = useCallback((e: React.DragEvent) => {
@@ -280,7 +282,7 @@ function UploadZone({ onFile }: { onFile: (name: string, text: string) => void }
         display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, textAlign: 'center',
       }}
     >
-      <input ref={inputRef} type="file" accept=".pdf,.doc,.docx,.txt" style={{ display: 'none' }}
+      <input ref={inputRef} type="file" accept=".pdf,.txt" style={{ display: 'none' }}
         onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f) }} />
       <div style={{
         width: 46, height: 46, borderRadius: 10,
@@ -300,7 +302,7 @@ function UploadZone({ onFile }: { onFile: (name: string, text: string) => void }
       ) : (
         <>
           <span style={{ fontWeight: 600, fontSize: 13, color: P.ink }}>Drop your resume here</span>
-          <span style={{ fontSize: 12, color: P.dim }}>PDF, DOCX, or TXT · up to 5 MB</span>
+          <span style={{ fontSize: 12, color: P.dim }}>PDF or TXT · up to 5 MB</span>
         </>
       )}
     </div>
@@ -657,7 +659,7 @@ function HowItWorks() {
         </div>
         <div className="how-grid">
           {[
-            { step: '01', icon: '↑', title: 'Upload your resume', desc: 'Drop your PDF, DOCX, or paste plain text. Our parser reads the full document structure.', accent: P.auroraPink },
+            { step: '01', icon: '↑', title: 'Upload your resume', desc: 'Drop your PDF, or paste plain text. Our parser reads the full document structure.', accent: P.auroraPink },
             { step: '02', icon: '⌥', title: 'Paste the job description', desc: 'Include the full Job Description requirements, qualifications, and context all inform the analysis.', accent: P.auroraBlue },
             { step: '03', icon: '✦', title: 'Get your match report', desc: 'See your score, keyword gaps, experience mismatches, and ranked improvement actions.', accent: P.auroraPurple },
           ].map(item => (
@@ -711,6 +713,7 @@ function DomainShowcase() {
 export default function App() {
   const [resumeText, setResumeText] = useState('')
   const [resumeFileName, setResumeFileName] = useState<string | null>(null)
+  const [resumeFile, setResumeFile] = useState<File | null>(null)
   const [jobText, setJobText] = useState('')
   const [result, setResult] = useState<AnalysisResult | null>(null)
   const [loading, setLoading] = useState(false)
@@ -719,14 +722,38 @@ export default function App() {
 
   const canAnalyze = jobText.trim().length > 10
 
-  const handleAnalyze = () => {
+  const handleAnalyze = async () => {
     if (!canAnalyze) return
     setLoading(true); setResult(null)
-    setTimeout(() => {
-      setResult(analyzeResume(resumeText, jobText))
-      setLoading(false)
+    try {
+      const form = new FormData()
+      form.append('job_desc', jobText)
+      if (resumeFile && resumeFile.name.toLowerCase().endsWith('.pdf')) {
+        form.append('resume', resumeFile)
+      } else {
+        form.append('resume_text', resumeText)
+      }
+      const res = await fetch('/analyze', { method: 'POST', body: form })
+      const data = await res.json()
+      if (!res.ok) {
+        alert(data.error || 'Something went wrong while analyzing the resume.')
+        return
+      }
+      setResult({
+        score: data.score,
+        domain: detectDomain(jobText),
+        matchedKeywords: data.matched,
+        missingKeywords: data.missing,
+        suggestions: data.suggestions,
+        experienceGap: data.experience_gap,
+        strengths: data.strengths,
+      })
       setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100)
-    }, 1800)
+    } catch (err) {
+      alert('Could not reach the server. Make sure python app.py is running.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   const inputStyle: React.CSSProperties = {
@@ -827,9 +854,9 @@ export default function App() {
             <div>
               <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 10, color: P.dim, letterSpacing: '0.12em', textTransform: 'uppercase' }}>Step 01</span>
               <h2 style={{ margin: '5px 0 2px', fontSize: 18, fontWeight: 800, letterSpacing: '-0.4px', color: P.ink }}>Upload Resume</h2>
-              <p style={{ margin: 0, fontSize: 12.5, color: P.dim }}>PDF, DOCX, or TXT format</p>
+              <p style={{ margin: 0, fontSize: 12.5, color: P.dim }}>PDF or TXT format</p>
             </div>
-            <UploadZone onFile={(name, text) => { setResumeFileName(name); setResumeText(text) }} />
+            <UploadZone onFile={(name, text, file) => { setResumeFileName(name); setResumeFile(file); setResumeText(text) }} />
             <div style={{ borderTop: `1px solid ${P.border}`, paddingTop: 14 }}>
               <p style={{ margin: '0 0 8px', fontSize: 12, color: P.muted, fontWeight: 500 }}>Or paste plain text:</p>
               <textarea value={resumeText} onChange={e => setResumeText(e.target.value)}

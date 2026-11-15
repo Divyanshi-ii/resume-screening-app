@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, send_from_directory
+from flask import Flask, render_template, request, send_from_directory, jsonify
 import pymupdf
 import os
 import re
@@ -11,6 +11,7 @@ FRONTEND_DIST = os.path.join(BASE_DIR, "frontend", "dist")
 
 app = Flask(__name__, static_folder=FRONTEND_DIST, static_url_path="")
 app.config["UPLOAD_FOLDER"] = os.path.join(BASE_DIR, "uploads")
+app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 MB upload limit
 
 STOP_WORDS = {
     "a","an","the","and","or","of","to","in","on","for","with","is","are","was","were",
@@ -64,6 +65,45 @@ def extract_phrases(text):
             found.append(phrase)
     return found
 
+# Skills the screener knows about: display name -> ways it may be written in text
+SKILLS = {
+    "Python": ["python"], "Java": ["java"], "C++": ["c++"], "JavaScript": ["javascript", "js"],
+    "TypeScript": ["typescript"], "SQL": ["sql"], "HTML": ["html", "html5"], "CSS": ["css", "css3"],
+    "React": ["react", "reactjs", "react js"], "Node.js": ["node js", "nodejs"],
+    "Flask": ["flask"], "Django": ["django"], "FastAPI": ["fastapi", "fast api"],
+    "REST APIs": ["rest api", "rest apis", "restful api", "restful apis"], "JSON": ["json"],
+    "PostgreSQL": ["postgresql", "postgres"], "MySQL": ["mysql"], "SQLite": ["sqlite"],
+    "MongoDB": ["mongodb", "mongo db"], "Machine Learning": ["machine learning", "ml"],
+    "Deep Learning": ["deep learning"], "Data Science": ["data science"],
+    "NLP": ["nlp", "natural language processing"], "Pandas": ["pandas"], "NumPy": ["numpy"],
+    "Scikit-learn": ["scikit learn", "sklearn"], "TensorFlow": ["tensorflow"],
+    "PyTorch": ["pytorch"], "Matplotlib": ["matplotlib"], "Tableau": ["tableau"],
+    "Power BI": ["power bi", "powerbi"], "Excel": ["excel"],
+    "Git": ["git"], "GitHub": ["github"], "Docker": ["docker"],
+    "Kubernetes": ["kubernetes", "k8s"], "Linux": ["linux"], "AWS": ["aws", "amazon web services"],
+    "Azure": ["azure"], "GCP": ["gcp", "google cloud"], "Cloud": ["cloud"],
+    "Data Structures": ["data structures"], "Algorithms": ["algorithms", "algorithm"],
+    "Agile": ["agile", "scrum"], "CI/CD": ["ci cd", "cicd"], "Testing": ["testing", "pytest", "unit tests"],
+    "Bootstrap": ["bootstrap"], "Tailwind CSS": ["tailwind", "tailwind css"], "Figma": ["figma"],
+    "Problem Solving": ["problem solving"], "Communication": ["communication"],
+    "Teamwork": ["teamwork", "team work"],
+}
+
+
+def normalize(text):
+    text = re.sub(r"[^a-z0-9+#\s]", " ", text.lower())
+    return " " + re.sub(r"\s+", " ", text).strip() + " "
+
+
+def find_skills(text):
+    norm = normalize(text)
+    found = []
+    for name, variants in SKILLS.items():
+        if any(f" {v} " in norm for v in variants):
+            found.append(name)
+    return found
+
+
 def get_match_score(resume_text, jd_text):
     resume_clean = clean_text(resume_text)
     jd_clean = clean_text(jd_text)
@@ -74,36 +114,33 @@ def get_match_score(resume_text, jd_text):
     if not resume_joined.strip() or not jd_joined.strip():
         return 0, [], []
 
+    # Part 1: TF-IDF cosine similarity between the whole resume and the whole job description
     vectorizer = TfidfVectorizer(ngram_range=(1, 2))
     vectors = vectorizer.fit_transform([resume_joined, jd_joined])
     similarity = cosine_similarity(vectors[0], vectors[1])[0][0]
     tfidf_score = round(similarity * 100, 2)
 
-    jd_keywords = extract_keywords(jd_text, top_n=20)
-    jd_phrases = extract_phrases(jd_text)
+    # Part 2: skill coverage - which skills named in the job description appear in the resume
+    jd_skills = find_skills(jd_text)
+    resume_skills = set(find_skills(resume_text))
 
+    if len(jd_skills) >= 3:
+        matched = [s for s in jd_skills if s in resume_skills]
+        missing = [s for s in jd_skills if s not in resume_skills]
+        skill_score = len(matched) / len(jd_skills) * 100
+        final_score = round(skill_score * 0.7 + tfidf_score * 0.3, 2)
+        return min(final_score, 100), matched[:20], missing[:20]
+
+    # Fallback for short job descriptions that name few known skills: plain keyword overlap
+    jd_keywords = extract_keywords(jd_text, top_n=20)
     resume_words = set(resume_clean)
     jd_words = set(jd_keywords)
+    matched_words = [w for w in jd_keywords if w in resume_words]
+    missing_words = [w for w in jd_keywords if w not in resume_words]
+    keyword_score = (len(matched_words) / len(jd_words) * 100) if jd_words else 0
+    final_score = round(tfidf_score * 0.5 + keyword_score * 0.5, 2)
+    return min(final_score, 100), matched_words[:20], missing_words[:20]
 
-    matched_words = list(resume_words & jd_words)
-    missing_words = list(jd_words - resume_words)
-
-    resume_phrase_text = " ".join(resume_clean)
-    jd_phrase_matches = [p for p in jd_phrases if p in resume_phrase_text and p in jd_text.lower()]
-
-    keyword_score = 0
-    if jd_words:
-        keyword_score += (len(matched_words) / len(jd_words)) * 70
-    if jd_phrases:
-        keyword_score += (len(jd_phrase_matches) / len(jd_phrases)) * 30
-
-    final_score = round((tfidf_score * 0.6) + (keyword_score * 0.4), 2)
-    final_score = min(final_score, 100)
-
-    combined_matched = list(dict.fromkeys(matched_words + jd_phrase_matches))
-    combined_missing = list(dict.fromkeys(missing_words))
-
-    return final_score, combined_matched[:20], combined_missing[:20]
 
 @app.route("/")
 def home():
@@ -112,31 +149,62 @@ def home():
         return app.send_static_file("index.html")
     return render_template("index.html")
 
+def build_feedback(score, matched, missing):
+    suggestions = []
+    for word in missing[:3]:
+        suggestions.append(
+            f'The job description mentions "{word}" but your resume does not. '
+            f"Add it to your skills or projects if you have used it."
+        )
+    if score < 50:
+        suggestions.append("Rewrite your summary so it uses the same wording as the job description.")
+    suggestions.append("Add numbers to your project results, for example the size of data or users served.")
+    suggestions.append("Link your GitHub or portfolio so recruiters can see your work.")
+
+    strengths = [f'Your resume already covers "{w}", which the job asks for.' for w in matched[:3]]
+    if not strengths:
+        strengths = ["No direct keyword matches found yet. Try adding the job's key terms."]
+
+    if missing:
+        gap = f"{missing[0]} related skills"
+    else:
+        gap = "None identified"
+    return suggestions, strengths, gap
+
+
 @app.route("/analyze", methods=["POST"])
 def analyze():
-    if "resume" not in request.files:
-        return "No file part found"
-
-    resume_file = request.files["resume"]
     job_desc = request.form.get("job_desc", "")
+    resume_text = request.form.get("resume_text", "")
+    resume_file = request.files.get("resume")
 
-    if resume_file.filename == "":
-        return "Please upload a resume file"
+    if resume_file and resume_file.filename:
+        if not resume_file.filename.lower().endswith(".pdf"):
+            return jsonify(error="Please upload a PDF file."), 400
+        os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+        filename = secure_filename(resume_file.filename)
+        file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+        resume_file.save(file_path)
+        try:
+            resume_text = extract_text_from_pdf(file_path)
+        except Exception:
+            return jsonify(error="Could not read this PDF. Try another file."), 400
 
-    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+    if not resume_text.strip():
+        return jsonify(error="No readable text found in the resume. Upload a text-based PDF or paste the text."), 400
+    if not job_desc.strip():
+        return jsonify(error="Please paste the job description."), 400
 
-    filename = secure_filename(resume_file.filename)
-    file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-    resume_file.save(file_path)
-
-    resume_text = extract_text_from_pdf(file_path)
     score, matched, missing = get_match_score(resume_text, job_desc)
+    suggestions, strengths, gap = build_feedback(score, matched, missing)
 
-    return render_template(
-        "result.html",
-        score=score,
+    return jsonify(
+        score=round(score),
         matched=matched,
-        missing=missing
+        missing=missing[:6],
+        suggestions=suggestions,
+        strengths=strengths,
+        experience_gap=gap,
     )
 
 @app.route("/<path:path>")
